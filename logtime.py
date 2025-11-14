@@ -1,209 +1,345 @@
-# **************************************************************************** #
-#                                                                              #
-#                                                         :::      ::::::::    #
-#    logtime.py                                         :+:      :+:    :+:    #
-#                                                     +:+ +:+         +:+      #
-#    By: abidaux <abidaux@student.42.fr>            +#+  +:+       +#+         #
-#                                                 +#+#+#+#+#+   +#+            #
-#    Created: 2025/10/11 17:05:19 by abidaux           #+#    #+#              #
-#    Updated: 2025/10/14 17:18:11 by abidaux          ###   ########.fr        #
-#                                                                              #
-# **************************************************************************** #
-
-from pathlib import Path
+import tkinter as tk
+from tkinter import ttk, messagebox
 import requests
+from datetime import datetime, timedelta, time
 import calendar
-from datetime import datetime, date, time, timedelta, timezone
-from dateutil import parser
-from typing import List, Dict
-import os
-from dotenv import load_dotenv
+from zoneinfo import ZoneInfo  # Nécessite Python 3.9+
 
-env_path = Path(__file__).parent.parent / '.env'
-load_dotenv(dotenv_path=env_path)
+# --- ⚠️ Configuration ---
+# REMPLACEZ AVEC VOS PROPRES IDENTIFIANTS
+# NE PARTAGEZ JAMAIS CES INFORMATIONS
+UID = "u-s4t2ud-feee8fe2e486c5b8283d09761378064997fd711c91d4f369429ef11967eb5df3"
+SECRET = "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"
+LOGIN_42 = "abidaux"
+# -------------------------
 
-CLIENT_ID = os.getenv('CLIENT_ID')
-CLIENT_SECRET = os.getenv('CLIENT_SECRET')
-API_BASE = "https://api.intra.42.fr/v2"
-PER_PAGE = 100
+# Configuration de l'API et du fuseau horaire
+API_URL = "https://api.intra.42.fr"
+TOKEN_URL = f"{API_URL}/oauth/token"
+LOCAL_TZ_NAME = "Europe/Paris"  # Fuseau horaire pour la restriction 6h-22h
 
-_TOKEN = None
-_TOKEN_EXP = datetime.min.replace(tzinfo=timezone.utc)
+class TimeTrackerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title(f"Tracker d'heures 42 - {LOGIN_42}")
+        self.root.geometry("350x435")
 
-def get_token(session: requests.Session) -> str:
-    global _TOKEN, _TOKEN_EXP
-    now = datetime.now(timezone.utc)
-    if _TOKEN and now < _TOKEN_EXP:
-        return _TOKEN
-    r = session.post(
-        "https://api.intra.42.fr/oauth/token",
-        data={"grant_type":"client_credentials","client_id":CLIENT_ID,"client_secret":CLIENT_SECRET},
-        timeout=10
-    )
-    r.raise_for_status()
-    data = r.json()
-    _TOKEN = data["access_token"]
-    _TOKEN_EXP = now + timedelta(seconds=int(data.get("expires_in", 3600)) - 60)
-    return _TOKEN
+        self.style = ttk.Style(self.root)
+        self.style.configure("TLabel", padding=5, font=("Arial", 10))
+        self.style.configure("Header.TLabel", padding=5, font=("Arial", 12, "bold"))
+        self.style.configure("Error.TLabel", foreground="red", font=("Arial", 10, "italic"))
 
-def fetch_all_locations(session: requests.Session, login: str) -> List[Dict]:
-    token = get_token(session)
-    headers = {"Authorization": f"Bearer {token}"}
-    out = []
-    page = 1
-    while True:
-        r = session.get(f"{API_BASE}/users/{login}/locations", headers=headers,
-                        params={"page": page, "per_page": PER_PAGE}, timeout=10)
-        if r.status_code != 200:
-            break
-        data = r.json()
-        if not data:
-            break
-        out.extend(data); page += 1
-    return out
+        self.main_frame = ttk.Frame(self.root, padding="10")
+        self.main_frame.pack(expand=True, fill=tk.BOTH)
 
-UTC = timezone.utc
-def parse_dt(s: str) -> datetime:
-    return parser.parse(s).astimezone(UTC)
+        # Variables pour stocker les résultats
+        self.status_var = tk.StringVar(value="Chargement...")
+        self.raw_total_var = tk.StringVar(value="--")
+        self.counted_total_var = tk.StringVar(value="--")
+        self.quota_var = tk.StringVar(value="--")
+        self.remaining_days_var = tk.StringVar(value="--")
+        self.remaining_hours_var = tk.StringVar(value="--")
+        self.avg_needed_var = tk.StringVar(value="--")
+        self.quota_90_var = tk.StringVar(value="--")
+        self.remaining_hours_90_var = tk.StringVar(value="--")
+        self.avg_needed_90_var = tk.StringVar(value="--")
 
-def clamp_interval(a: datetime, b: datetime, start: datetime, end: datetime):
-    s = max(a, start); e = min(b, end)
-    return (s, e) if e > s else (None, None)
+        self.create_widgets()
 
-def overlap_seconds_interval(a: datetime, b: datetime) -> float:
-    return max(0.0, (b - a).total_seconds())
+        # Lancer le rafraîchissement des données après l'affichage de la fenêtre
+        self.root.after(100, self.refresh_data)
 
-# --- Core: logtime (with optional restriction 6h-22h lun-sam) ---
-def daily_restricted_seconds(a: datetime, b: datetime) -> float:
-    """Compte les secondes entre a et b qui tombent entre 06:00-22:00 du lundi au samedi."""
-    total = 0.0
-    start_day = a.date()
-    end_day = b.date()
-    for d_offset in range((end_day - start_day).days + 1):
-        day = start_day + timedelta(days=d_offset)
-        if day.weekday() >= 6:  # dimanche=6 -> exclu
-            continue
-        day_start = datetime.combine(day, time(6,0), tzinfo=UTC)
-        day_end   = datetime.combine(day, time(22,0), tzinfo=UTC)
-        s,e = clamp_interval(a, b, day_start, day_end)
-        if s: total += overlap_seconds_interval(s,e)
-    return total
+    def create_widgets(self):
+        # --- Section Stats Actuelles ---
+        ttk.Label(self.main_frame, text="📈 Vos Statistiques (Mois en cours)", style="Header.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=5)
 
-def sum_logtime(locations: List[Dict], period_start: datetime, period_end: datetime, restricted: bool=False) -> float:
-    total = 0.0
-    for loc in locations:
-        begin = parse_dt(loc["begin_at"])
-        end = parse_dt(loc["end_at"]) if loc.get("end_at") else datetime.now(UTC)
-        # limiter à la période demandée
-        s,e = clamp_interval(begin, end, period_start, period_end)
-        if not s: continue
-        total += (daily_restricted_seconds(s,e) if restricted else overlap_seconds_interval(s,e))
-    return total
+        ttk.Label(self.main_frame, text="Quota du mois :").grid(row=1, column=0, sticky="w")
+        ttk.Label(self.main_frame, textvariable=self.quota_var).grid(row=1, column=1, sticky="e")
 
-# --- Petites fonctions utilitaires ---
-def format_duration(seconds: float) -> str:
-    h = int(seconds // 3600); m = int((seconds % 3600) // 60)
-    return f"{h}h {m}min"
+        ttk.Label(self.main_frame, text="Temps comptabilisé (6h-22h, Lun-Sam) :").grid(row=2, column=0, sticky="w")
+        ttk.Label(self.main_frame, textvariable=self.counted_total_var, font=("Arial", 10, "bold")).grid(row=2, column=1, sticky="e")
 
-def days_in_month(dt: datetime) -> int:
-    return calendar.monthrange(dt.year, dt.month)[1]
+        ttk.Label(self.main_frame, text="Temps total brut (24/7) :").grid(row=3, column=0, sticky="w")
+        ttk.Label(self.main_frame, textvariable=self.raw_total_var).grid(row=3, column=1, sticky="e")
 
-def working_days_between(start: date, end: date) -> List[date]:
-    return [start + timedelta(days=i) for i in range((end - start).days + 1) if (start + timedelta(days=i)).weekday() < 6]
+        # --- Séparateur ---
+        ttk.Separator(self.main_frame, orient="horizontal").grid(row=4, column=0, columnspan=2, sticky="ew", pady=10)
 
-# --- Exemple d'utilisation / MAIN ---
+        # --- Section Objectif 100% ---
+        ttk.Label(self.main_frame, text="🎯 Objectif 100%", style="Header.TLabel").grid(row=5, column=0, columnspan=2, sticky="w", pady=5)
+
+        ttk.Label(self.main_frame, text="Heures restantes :").grid(row=6, column=0, sticky="w")
+        ttk.Label(self.main_frame, textvariable=self.remaining_hours_var).grid(row=6, column=1, sticky="e")
+
+        ttk.Label(self.main_frame, text="Jours ouvrés restants :").grid(row=7, column=0, sticky="w")
+        ttk.Label(self.main_frame, textvariable=self.remaining_days_var).grid(row=7, column=1, sticky="e")
+
+        ttk.Label(self.main_frame, text="Moyenne/jours requise :").grid(row=8, column=0, sticky="w")
+        ttk.Label(self.main_frame, textvariable=self.avg_needed_var, font=("Arial", 10, "bold")).grid(row=8, column=1, sticky="e")
+
+        # --- Séparateur ---
+        ttk.Separator(self.main_frame, orient="horizontal").grid(row=9, column=0, columnspan=2, sticky="ew", pady=10)
+
+        # --- Section Objectif 90% ---
+        ttk.Label(self.main_frame, text="🚩 Objectif 90%", style="Header.TLabel").grid(row=10, column=0, columnspan=2, sticky="w", pady=5)
+
+        ttk.Label(self.main_frame, text="Quota (90%) :").grid(row=11, column=0, sticky="w")
+        ttk.Label(self.main_frame, textvariable=self.quota_90_var).grid(row=11, column=1, sticky="e")
+
+        ttk.Label(self.main_frame, text="Heures restantes (90%) :").grid(row=12, column=0, sticky="w")
+        ttk.Label(self.main_frame, textvariable=self.remaining_hours_90_var).grid(row=12, column=1, sticky="e")
+
+        ttk.Label(self.main_frame, text="Moyenne/jours (90%) :").grid(row=13, column=0, sticky="w")
+        ttk.Label(self.main_frame, textvariable=self.avg_needed_90_var).grid(row=13, column=1, sticky="e")
+
+        # --- Status Bar ---
+        self.status_label = ttk.Label(self.main_frame, textvariable=self.status_var, style="Error.TLabel")
+        self.status_label.grid(row=14, column=0, columnspan=2, sticky="w", pady=10)
+
+        # Configurer l'expansion des colonnes
+        # Configurer l'expansion des colonnes
+        self.main_frame.columnconfigure(0, weight=1)
+        self.main_frame.columnconfigure(1, weight=1)
+
+    def refresh_data(self):
+        try:
+            self.status_label.config(style="TLabel") # Style normal
+            self.status_var.set("Authentification en cours...")
+            self.root.update_idletasks() # Forcer la mise à jour de l'UI
+
+            # Vérifier les identifiants
+            if UID == "VOTRE_UID" or SECRET == "VOTRE_SECRET":
+                raise ValueError("Veuillez configurer votre UID et SECRET en haut du script.")
+
+            token = self.get_api_token()
+
+            self.status_var.set("Récupération de l'ID utilisateur...")
+            self.root.update_idletasks()
+            user_id = self.get_user_id(token)
+
+            # Définir le fuseau horaire et les dates
+            local_tz = ZoneInfo(LOCAL_TZ_NAME)
+            utc_tz = ZoneInfo("UTC")
+            now_local = datetime.now(local_tz)
+
+            start_of_month_local = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            # L'API 42 utilise des plages inclusives/exclusives étranges.
+            # Prenons le premier jour du mois prochain pour la fin.
+            next_month = (start_of_month_local + timedelta(days=32)).replace(day=1)
+            end_of_month_utc = next_month.astimezone(utc_tz) # Fin = 1er du mois prochain UTC
+            start_of_month_utc = start_of_month_local.astimezone(utc_tz)
+
+            self.status_var.set("Récupération des sessions (peut prendre du temps)...")
+            self.root.update_idletasks()
+            locations = self.get_locations(token, user_id, start_of_month_utc, end_of_month_utc)
+
+            self.status_var.set("Calcul des heures...")
+            self.root.update_idletasks()
+            raw_hours, counted_hours = self.calculate_hours(locations, local_tz)
+
+            self.status_var.set("Calcul des objectifs...")
+            self.root.update_idletasks()
+            stats = self.get_quota_stats(counted_hours, now_local)
+
+            # Mettre à jour l'interface graphique
+            self.raw_total_var.set(f"{raw_hours:.2f} h")
+            self.counted_total_var.set(f"{counted_hours:.2f} h")
+            self.quota_var.set(f"{stats['quota']} h")
+            self.remaining_days_var.set(f"{stats['remaining_open_days']} jours")
+
+            self.remaining_hours_var.set(f"{stats['hours_remaining']:.2f} h")
+            self.avg_needed_var.set(f"{stats['avg_per_day']:.2f} h / jours")
+
+            self.quota_90_var.set(f"{stats['quota_90']:.2f} h")
+            self.remaining_hours_90_var.set(f"{stats['hours_remaining_90']:.2f} h")
+            self.avg_needed_90_var.set(f"{stats['avg_per_day_90']:.2f} h / jours")
+
+            if stats['avg_per_day'] > 16: # Seuil d'alerte
+                self.avg_needed_var.set(f"{stats['avg_per_day']:.2f} h / jours (Impossible ?)")
+            elif stats['avg_per_day'] < 0:
+                 self.avg_needed_var.set("Objectif atteint ! 🎉")
+
+            self.status_var.set("Terminé.")
+
+        except Exception as e:
+            self.status_label.config(style="Error.TLabel") # Style erreur
+            self.status_var.set(f"Erreur : {e}")
+            messagebox.showerror("Erreur", str(e))
+
+    def get_api_token(self):
+        payload = {
+            'grant_type': 'client_credentials',
+            'client_id': UID,
+            'client_secret': SECRET
+        }
+        response = requests.post(TOKEN_URL, data=payload)
+        response.raise_for_status()
+        return response.json()['access_token']
+
+    def get_user_id(self, token):
+        headers = {'Authorization': f'Bearer {token}'}
+        response = requests.get(f"{API_URL}/v2/users/{LOGIN_42}", headers=headers)
+        response.raise_for_status()
+        return response.json()['id']
+
+    def get_locations(self, token, user_id, start_date, end_date):
+        locations = []
+        page = 1
+        headers = {'Authorization': f'Bearer {token}'}
+
+        while True:
+            params = {
+                'page[size]': 100,
+                'page[number]': page,
+                'range[begin_at]': f'{start_date.isoformat()},{end_date.isoformat()}',
+                'sort': 'begin_at'
+            }
+            try:
+                response = requests.get(
+                    f"{API_URL}/v2/users/{user_id}/locations",
+                    headers=headers,
+                    params=params
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                if not data:
+                    break  # Plus de données
+
+                locations.extend(data)
+
+                if len(data) < 100:
+                    break  # C'était la dernière page
+
+                page += 1
+            except requests.RequestException as e:
+                raise Exception(f"Erreur API (page {page}): {e.response.text}")
+
+        return locations
+
+    def calculate_hours(self, locations, local_tz):
+        total_raw_seconds = 0
+        total_counted_seconds = 0
+        utc_tz = ZoneInfo('UTC')
+        now_utc = datetime.now(utc_tz)
+
+        # Heures de début et de fin (en heure locale)
+        valid_start_time = time(6, 0, 0)
+        valid_end_time = time(22, 0, 0)
+
+        for session in locations:
+            try:
+                start_utc = datetime.fromisoformat(session['begin_at'].replace('Z', '+00:00'))
+
+                if session['end_at']:
+                    end_utc = datetime.fromisoformat(session['end_at'].replace('Z', '+00:00'))
+                else:
+                    end_utc = now_utc # Toujours connecté
+
+                # 1. Calcul du temps total brut
+                total_raw_seconds += (end_utc - start_utc).total_seconds()
+
+                # 2. Calcul du temps comptabilisé (plus complexe)
+                local_start = start_utc.astimezone(local_tz)
+                local_end = end_utc.astimezone(local_tz)
+
+                # Itérer jour par jour pour les sessions qui durent plusieurs jours
+                current_time = local_start
+                while current_time < local_end:
+                    # Vérifier si le jour est valide (0=Lundi, 5=Samedi, 6=Dimanche)
+                    if current_time.weekday() < 6:
+                        # Définir la fenêtre de temps valide pour CE jour
+                        day_allowed_start = current_time.replace(
+                            hour=valid_start_time.hour, minute=valid_start_time.minute, second=0, microsecond=0)
+                        day_allowed_end = current_time.replace(
+                            hour=valid_end_time.hour, minute=valid_end_time.minute, second=0, microsecond=0)
+
+                        # Calculer le chevauchement (overlap)
+                        overlap_start = max(current_time, day_allowed_start)
+                        overlap_end = min(local_end, day_allowed_end)
+
+                        # Ajouter le temps si le chevauchement est valide
+                        if overlap_end > overlap_start:
+                            total_counted_seconds += (overlap_end - overlap_start).total_seconds()
+
+                    # Passer au début du jour suivant
+                    current_time = (current_time + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+            except Exception as e:
+                print(f"Erreur en traitant la session {session.get('id')}: {e}")
+
+        return (total_raw_seconds / 3600, total_counted_seconds / 3600)
+
+    def get_quota_stats(self, counted_hours, now_local):
+        # 1. Déterminer le quota
+        days_in_month = calendar.monthrange(now_local.year, now_local.month)[1]
+
+        if now_local.month == 2:
+            quota = 135
+        elif days_in_month == 30:
+            quota = 150
+        else: # 31 jours
+            quota = 155
+
+        # 2. Calculer les jours ouvrés restants (à partir de DEMAIN)
+        remaining_open_days = 0
+        day_to_check = (now_local + timedelta(days=1)).replace(hour=0, minute=0)
+        end_of_month = now_local.replace(day=days_in_month, hour=23, minute=59)
+
+        while day_to_check <= end_of_month:
+            # 0=Lundi, 5=Samedi, 6=Dimanche
+            if day_to_check.weekday() < 6:
+                remaining_open_days += 1
+            day_to_check += timedelta(days=1)
+
+        # 3. Calculer les stats
+        hours_remaining = quota - counted_hours
+
+        if remaining_open_days > 0:
+            avg_per_day = hours_remaining / remaining_open_days
+        else:
+            avg_per_day = 0 if hours_remaining <= 0 else float('inf') # Infini si on a pas fini
+
+        # 4. Stats pour 90%
+        quota_90 = quota * 0.90
+        hours_remaining_90 = quota_90 - counted_hours
+
+        if remaining_open_days > 0:
+            avg_per_day_90 = hours_remaining_90 / remaining_open_days
+        else:
+            avg_per_day_90 = 0 if hours_remaining_90 <= 0 else float('inf')
+
+        return {
+            "quota": quota,
+            "hours_remaining": hours_remaining,
+            "remaining_open_days": remaining_open_days,
+            "avg_per_day": avg_per_day,
+            "quota_90": quota_90,
+            "hours_remaining_90": hours_remaining_90,
+            "avg_per_day_90": avg_per_day_90
+        }
+
 if __name__ == "__main__":
-    import tkinter as tk
+    # Vérifier les dépendances
+    try:
+        import requests
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        print("Erreur : La bibliothèque 'requests' ou 'zoneinfo' (Python 3.9+) n'est pas installée.")
+        print("Veuillez installer requests : pip install requests")
+        print("Assurez-vous d'utiliser Python 3.9 ou plus récent pour 'zoneinfo'.")
+        exit(1)
 
-    LOGIN = "abidaux"
-    session = requests.Session()
-    locs = fetch_all_locations(session, LOGIN)
+    # Vérifier les identifiants
+    if UID == "VOTRE_UID" or SECRET == "VOTRE_SECRET":
+        print("############################################################")
+        print(" ERREUR DE CONFIGURATION")
+        print(" Vous devez modifier ce script et insérer votre UID et")
+        print(" votre SECRET aux lignes 12 et 13.")
+        print(" NE PARTAGEZ JAMAIS CES IDENTIFIANTS.")
+        print("############################################################")
+        # On ouvre quand même la fenêtre pour afficher l'erreur
 
-    now = datetime.now(UTC)
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-    today_sec = sum_logtime(locs, day_start, now, restricted=False)
-    month_sec = sum_logtime(locs, month_start, now, restricted=False)
-    month_sec_restricted = sum_logtime(locs, month_start, now, restricted=True)
-
-    dim = days_in_month(now)
-    hr_req = 5 * dim  # 35h/semaine -> 5h/jour * jours du mois
-
-    rem_hours = hr_req - (month_sec_restricted / 3600)
-    end_of_month = (month_start + timedelta(days=dim-1)).replace(hour=23, minute=59, second=59)
-    remaining_workdays = working_days_between((now + timedelta(days=1)).date(), end_of_month.date())
-    n_days = len(remaining_workdays)
-    per_day = (rem_hours / n_days) if n_days else 0
-
-    # Affichage graphique stylisé avec Tkinter
     root = tk.Tk()
-    root.title("Logtime 42")
-    root.configure(bg="#f0f4f8")
-
-    title = tk.Label(root, text="Résumé Logtime 42", font=("Arial", 18, "bold"), bg="#f0f4f8", fg="#2d415a")
-    title.pack(pady=(18, 10))
-
-    frame = tk.LabelFrame(root, text="Statistiques du mois", font=("Arial", 13, "bold"), bg="#e6ecf2", fg="#2d415a", bd=2, relief="groove", padx=18, pady=12, labelanchor='n')
-    frame.pack(padx=24, pady=12)
-
-
-    # Affichage séparé pour chaque donnée, mais regroupement visuel par espacement
-    labels = [
-        ("Mois", now.strftime('%B %Y')),
-        ("Heures requises", f"{hr_req}h"),
-        ("Tolérance (90%)", f"{hr_req*0.9:.1f}h"),
-        ("Aujourd'hui", format_duration(today_sec)),
-        ("Ce mois", format_duration(month_sec)),
-        ("Heures restantes", f"{rem_hours:.1f}h"),
-        ("Jours ouvrés restants", str(n_days)),
-    ]
-    if n_days:
-        labels.append(("Par jour ouvré restant", format_duration(per_day * 3600)))
-
-
-    # Espacement visuel entre groupes
-    group_gaps = [1, 3, 6]  # après ces indices, on ajoute un espace plus grand
-
-    for i, (label_txt, value) in enumerate(labels):
-        pady = 12 if i in group_gaps else 4
-        l = tk.Label(frame, text=label_txt, font=("Arial", 12, "bold"), bg="#e6ecf2", fg="#2d415a", bd=1, relief="solid", width=22, anchor="e")
-        l.grid(row=i, column=0, sticky="e", padx=(0, 8), pady=pady, ipady=3)
-        v = tk.Label(frame, text=value, font=("Arial", 12), bg="#ffffff", fg="#1a2733", bd=1, relief="solid", width=18, anchor="w")
-        v.grid(row=i, column=1, sticky="w", padx=(0, 0), pady=pady, ipady=3)
-
-    # Ajout de deux barres de progression : progression du mois (en jours) et progression du mois en logtime (non restreint)
-    bar_width = 320
-    bar_height = 18
-    bar_bg = "#dbe6ee"
-    bar_fg = "#4a90e2"
-
-    # Progression du mois (en jours)
-    total_days = days_in_month(now)
-    current_day = now.day
-    progress_days = min(1.0, current_day / total_days) if total_days > 0 else 0
-    progress_label1 = tk.Label(frame, text="Progression du mois (en jours)", font=("Arial", 11, "bold"), bg="#e6ecf2", fg="#2d415a")
-    progress_label1.grid(row=len(labels)+1, column=0, columnspan=2, pady=(18, 2))
-    canvas1 = tk.Canvas(frame, width=bar_width, height=bar_height, bg="#e6ecf2", highlightthickness=0)
-    canvas1.grid(row=len(labels)+2, column=0, columnspan=2, pady=(0, 10))
-    canvas1.create_rectangle(0, 0, bar_width, bar_height, fill=bar_bg, outline=bar_bg, width=0)
-    fill_width1 = int(bar_width * progress_days)
-    if fill_width1 > 0:
-        canvas1.create_rectangle(0, 0, fill_width1, bar_height, fill=bar_fg, outline=bar_fg, width=0)
-    percent1 = int(progress_days * 100)
-    canvas1.create_text(bar_width//2, bar_height//2, text=f"{percent1}%", fill="#2d415a", font=("Arial", 11, "bold"))
-
-    # Progression du mois en logtime (non restreint)
-    progress_logtime = min(1.0, month_sec / (hr_req * 3600)) if hr_req > 0 else 0
-    progress_label2 = tk.Label(frame, text="Progression du mois en logtime", font=("Arial", 11, "bold"), bg="#e6ecf2", fg="#2d415a")
-    progress_label2.grid(row=len(labels)+3, column=0, columnspan=2, pady=(8, 2))
-    canvas2 = tk.Canvas(frame, width=bar_width, height=bar_height, bg="#e6ecf2", highlightthickness=0)
-    canvas2.grid(row=len(labels)+4, column=0, columnspan=2, pady=(0, 10))
-    canvas2.create_rectangle(0, 0, bar_width, bar_height, fill=bar_bg, outline=bar_bg, width=0)
-    fill_width2 = int(bar_width * progress_logtime)
-    if fill_width2 > 0:
-        canvas2.create_rectangle(0, 0, fill_width2, bar_height, fill=bar_fg, outline=bar_fg, width=0)
-    percent2 = int(progress_logtime * 100)
-    canvas2.create_text(bar_width//2, bar_height//2, text=f"{percent2}%", fill="#2d415a", font=("Arial", 11, "bold"))
-
+    app = TimeTrackerApp(root)
     root.mainloop()
