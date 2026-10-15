@@ -3,14 +3,15 @@ from tkinter import ttk, messagebox
 import requests
 from datetime import datetime, timedelta, time
 import calendar
+import os
 from zoneinfo import ZoneInfo  # Nécessite Python 3.9+
 
-# --- ⚠️ Configuration ---
-# REMPLACEZ AVEC VOS PROPRES IDENTIFIANTS
-# NE PARTAGEZ JAMAIS CES INFORMATIONS
-UID = "u-s4t2ud-feee8fe2e486c5b8283d09761378064997fd711c91d4f369429ef11967eb5df3"
-SECRET = "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"
-LOGIN_42 = "abidaux"
+# --- Configuration ---
+# Identifiants de votre application 42 (intra -> Settings -> API),
+# lus dans l'environnement : FT_UID, FT_SECRET, FT_LOGIN.
+UID = os.environ.get("FT_UID", "")
+SECRET = os.environ.get("FT_SECRET", "")
+LOGIN_42 = os.environ.get("FT_LOGIN", "")
 # -------------------------
 
 # Configuration de l'API et du fuseau horaire
@@ -108,8 +109,8 @@ class TimeTrackerApp:
             self.root.update_idletasks() # Forcer la mise à jour de l'UI
 
             # Vérifier les identifiants
-            if UID == "VOTRE_UID" or SECRET == "VOTRE_SECRET":
-                raise ValueError("Veuillez configurer votre UID et SECRET en haut du script.")
+            if not (UID and SECRET and LOGIN_42):
+                raise ValueError("Définissez FT_UID, FT_SECRET et FT_LOGIN avant de lancer le script.")
 
             token = self.get_api_token()
 
@@ -331,12 +332,11 @@ if __name__ == "__main__":
         exit(1)
 
     # Vérifier les identifiants
-    if UID == "VOTRE_UID" or SECRET == "VOTRE_SECRET":
+    if not (UID and SECRET and LOGIN_42):
         print("############################################################")
         print(" ERREUR DE CONFIGURATION")
-        print(" Vous devez modifier ce script et insérer votre UID et")
-        print(" votre SECRET aux lignes 12 et 13.")
-        print(" NE PARTAGEZ JAMAIS CES IDENTIFIANTS.")
+        print(" Définissez FT_UID, FT_SECRET et FT_LOGIN, par exemple :")
+        print("   FT_UID=... FT_SECRET=... FT_LOGIN=... python3 logtime.py")
         print("############################################################")
         # On ouvre quand même la fenêtre pour afficher l'erreur
 
